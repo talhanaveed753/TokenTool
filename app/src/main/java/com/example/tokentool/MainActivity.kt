@@ -1,5 +1,6 @@
 package com.example.tokentool
 
+import android.content.SharedPreferences
 import android.nfc.FormatException
 import android.nfc.NdefMessage
 import android.nfc.NdefRecord
@@ -59,14 +60,21 @@ private const val COLOR_BLUE = "blue"
 private const val COLOR_YELLOW = "yellow"
 private const val COLOR_RED = "red"
 
+private const val PREFS_NAME = "token_writer_prefs"
+private const val KEY_IDS_INITIALIZED = "token_ids_initialized"
+private const val KEY_TOKEN_ID_PREFIX = "token_id_"
+
 private val DOMAIN_OPTIONS = listOf(DOMAIN_PHYSICAL_ACTIVITY, DOMAIN_SLEEP, DOMAIN_MOOD)
 private val COLOR_OPTIONS = listOf(COLOR_GREEN, COLOR_BLUE, COLOR_YELLOW, COLOR_RED)
 
 class MainActivity : ComponentActivity() {
+    private lateinit var prefs: SharedPreferences
+
     private var screenState by mutableStateOf(ScreenState())
     private val writerConfigRef = AtomicReference(
         WriterConfig(
             form = TokenForm(),
+            tokenIdsByDomain = defaultTokenIdsMap(),
             autoIncrement = true,
             incrementStep = 1
         )
@@ -84,6 +92,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        screenState = screenState.copy(tokenIdsByDomain = initializeAndLoadTokenIds())
+
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
         refreshNfcStatus()
         syncWriterConfig()
@@ -92,7 +103,7 @@ class MainActivity : ComponentActivity() {
             TokenToolTheme {
                 TokenWriterScreen(
                     state = screenState,
-                    onTokenIdChange = { updateForm(screenState.form.copy(tokenId = it)) },
+                    onTokenIdChange = { updateSelectedDomainTokenId(it) },
                     onDomainTypeChange = { updateForm(screenState.form.copy(domainType = it)) },
                     onColorChange = { updateForm(screenState.form.copy(color = it)) },
                     onUserNoteChange = { updateForm(screenState.form.copy(userNote = it)) },
@@ -120,8 +131,39 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    private fun initializeAndLoadTokenIds(): Map<String, String> {
+        if (!prefs.getBoolean(KEY_IDS_INITIALIZED, false)) {
+            val editor = prefs.edit()
+            editor.putBoolean(KEY_IDS_INITIALIZED, true)
+            DOMAIN_OPTIONS.forEach { domainType ->
+                editor.putString(tokenIdKey(domainType), "0")
+            }
+            editor.apply()
+        }
+
+        return DOMAIN_OPTIONS.associateWith { domainType ->
+            prefs.getString(tokenIdKey(domainType), "0") ?: "0"
+        }
+    }
+
+    private fun tokenIdKey(domainType: String): String = "$KEY_TOKEN_ID_PREFIX$domainType"
+
+    private fun persistTokenId(domainType: String, tokenId: String) {
+        prefs.edit().putString(tokenIdKey(domainType), tokenId).apply()
+    }
+
     private fun updateForm(nextForm: TokenForm) {
         screenState = screenState.copy(form = nextForm)
+        syncWriterConfig()
+    }
+
+    private fun updateSelectedDomainTokenId(tokenId: String) {
+        val selectedDomain = screenState.form.domainType
+        val nextTokenIds = screenState.tokenIdsByDomain.toMutableMap().apply {
+            put(selectedDomain, tokenId)
+        }
+        screenState = screenState.copy(tokenIdsByDomain = nextTokenIds)
+        persistTokenId(selectedDomain, tokenId)
         syncWriterConfig()
     }
 
@@ -130,6 +172,7 @@ class MainActivity : ComponentActivity() {
         writerConfigRef.set(
             WriterConfig(
                 form = screenState.form,
+                tokenIdsByDomain = HashMap(screenState.tokenIdsByDomain),
                 autoIncrement = screenState.autoIncrement,
                 incrementStep = step
             )
@@ -179,12 +222,13 @@ class MainActivity : ComponentActivity() {
 
     private fun handleTagDiscovered(tag: Tag) {
         val config = writerConfigRef.get()
+        val domainType = config.form.domainType
+        val tokenId = config.tokenIdsByDomain[domainType].orEmpty().trim()
 
-        val tokenId = config.form.tokenId.trim()
         if (tokenId.isEmpty()) {
             runOnUiThread {
                 screenState = screenState.copy(
-                    statusMessage = "Token ID cannot be empty.",
+                    statusMessage = "Token ID for $domainType cannot be empty.",
                     statusType = StatusType.Error
                 )
             }
@@ -206,7 +250,12 @@ class MainActivity : ComponentActivity() {
         try {
             writeJsonToTag(tag, jsonPayload)
             runOnUiThread {
-                onWriteSuccess(tagIdHex, config.incrementStep, config.autoIncrement)
+                onWriteSuccess(
+                    tagIdHex = tagIdHex,
+                    domainType = domainType,
+                    incrementStep = config.incrementStep,
+                    autoIncrement = config.autoIncrement
+                )
             }
         } catch (e: Exception) {
             runOnUiThread {
@@ -218,7 +267,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun onWriteSuccess(tagIdHex: String, incrementStep: Int, autoIncrement: Boolean) {
+    private fun onWriteSuccess(
+        tagIdHex: String,
+        domainType: String,
+        incrementStep: Int,
+        autoIncrement: Boolean
+    ) {
         var nextState = screenState.copy(
             writeCount = screenState.writeCount + 1,
             lastTagIdHex = tagIdHex,
@@ -227,15 +281,19 @@ class MainActivity : ComponentActivity() {
         )
 
         if (autoIncrement) {
-            val currentId = nextState.form.tokenId.trim()
+            val currentId = nextState.tokenIdsByDomain[domainType].orEmpty().trim()
             val numericId = currentId.toLongOrNull()
             if (numericId != null) {
+                val nextTokenId = (numericId + incrementStep).toString()
                 nextState = nextState.copy(
-                    form = nextState.form.copy(tokenId = (numericId + incrementStep).toString())
+                    tokenIdsByDomain = nextState.tokenIdsByDomain.toMutableMap().apply {
+                        put(domainType, nextTokenId)
+                    }
                 )
+                persistTokenId(domainType, nextTokenId)
             } else {
                 nextState = nextState.copy(
-                    statusMessage = "${nextState.statusMessage} Auto-increment skipped (tokenId is not numeric)."
+                    statusMessage = "${nextState.statusMessage} Auto-increment skipped (tokenId for $domainType is not numeric)."
                 )
             }
         }
@@ -314,12 +372,11 @@ class MainActivity : ComponentActivity() {
 }
 
 private data class TokenForm(
-    val tokenId: String = "0",
     val domainType: String = DOMAIN_PHYSICAL_ACTIVITY,
     val color: String = COLOR_GREEN,
     val userNote: String = ""
 ) {
-    fun toJsonString(tokenId: String = this.tokenId): String {
+    fun toJsonString(tokenId: String): String {
         return JSONObject()
             .put("tokenId", tokenId)
             .put("domainType", domainType)
@@ -328,7 +385,7 @@ private data class TokenForm(
             .toString()
     }
 
-    fun toPrettyJson(): String {
+    fun toPrettyJson(tokenId: String): String {
         return JSONObject()
             .put("tokenId", tokenId.trim())
             .put("domainType", domainType)
@@ -340,12 +397,14 @@ private data class TokenForm(
 
 private data class WriterConfig(
     val form: TokenForm,
+    val tokenIdsByDomain: Map<String, String>,
     val autoIncrement: Boolean,
     val incrementStep: Int
 )
 
 private data class ScreenState(
     val form: TokenForm = TokenForm(),
+    val tokenIdsByDomain: Map<String, String> = defaultTokenIdsMap(),
     val autoIncrement: Boolean = true,
     val incrementStepInput: String = "1",
     val writeCount: Int = 0,
@@ -372,6 +431,7 @@ private fun TokenWriterScreen(
     onAutoIncrementChange: (Boolean) -> Unit,
     onIncrementStepChange: (String) -> Unit
 ) {
+    val selectedDomainTokenId = state.tokenIdsByDomain[state.form.domainType] ?: "0"
     val scrollState = rememberScrollState()
 
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -389,26 +449,31 @@ private fun TokenWriterScreen(
                 style = MaterialTheme.typography.headlineSmall
             )
             Text(
-                text = "Enter token data once, then keep tapping tokens. The app remains in write mode while this screen is open.",
+                text = "Each domain keeps its own token ID sequence. Values are saved on this device and restored after restart.",
                 style = MaterialTheme.typography.bodyMedium
             )
 
             StatusCard(state)
-
-            OutlinedTextField(
-                value = state.form.tokenId,
-                onValueChange = onTokenIdChange,
-                label = { Text("Token ID") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-            )
 
             OptionGroup(
                 title = "Domain Type",
                 options = DOMAIN_OPTIONS,
                 selected = state.form.domainType,
                 onSelect = onDomainTypeChange
+            )
+
+            OutlinedTextField(
+                value = selectedDomainTokenId,
+                onValueChange = onTokenIdChange,
+                label = { Text("Token ID for ${state.form.domainType}") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+            )
+
+            DomainCounterCard(
+                tokenIdsByDomain = state.tokenIdsByDomain,
+                selectedDomain = state.form.domainType
             )
 
             OptionGroup(
@@ -479,7 +544,7 @@ private fun TokenWriterScreen(
                 shape = MaterialTheme.shapes.medium
             ) {
                 Text(
-                    text = state.form.toPrettyJson(),
+                    text = state.form.toPrettyJson(selectedDomainTokenId),
                     modifier = Modifier.padding(12.dp),
                     style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
                 )
@@ -491,6 +556,37 @@ private fun TokenWriterScreen(
                 style = MaterialTheme.typography.bodySmall
             )
             Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun DomainCounterCard(
+    tokenIdsByDomain: Map<String, String>,
+    selectedDomain: String
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "Saved Next Token IDs by Domain",
+                style = MaterialTheme.typography.titleSmall
+            )
+            DOMAIN_OPTIONS.forEach { domainType ->
+                val marker = if (domainType == selectedDomain) "->" else "  "
+                val tokenId = tokenIdsByDomain[domainType] ?: "0"
+                Text(
+                    text = "$marker $domainType: $tokenId",
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                )
+            }
         }
     }
 }
@@ -587,6 +683,9 @@ private fun OptionGroup(
     }
 }
 
+private fun defaultTokenIdsMap(): Map<String, String> =
+    DOMAIN_OPTIONS.associateWith { "0" }
+
 private fun ByteArray.toHexString(): String =
     joinToString(separator = "") { byte -> "%02X".format(byte.toInt() and 0xFF) }
 
@@ -596,6 +695,11 @@ private fun TokenWriterScreenPreview() {
     TokenToolTheme {
         TokenWriterScreen(
             state = ScreenState(
+                tokenIdsByDomain = mapOf(
+                    DOMAIN_PHYSICAL_ACTIVITY to "12",
+                    DOMAIN_SLEEP to "8",
+                    DOMAIN_MOOD to "3"
+                ),
                 statusMessage = "Ready. Tap a token to write JSON.",
                 writeCount = 3,
                 lastTagIdHex = "04A2BC9D"
