@@ -54,6 +54,7 @@ import kotlin.math.max
 private const val DOMAIN_PHYSICAL_ACTIVITY = "physical_activity"
 private const val DOMAIN_SLEEP = "sleep"
 private const val DOMAIN_MOOD = "mood"
+private const val DOMAIN_SPECIAL = "special"
 
 private const val COLOR_GREEN = "green"
 private const val COLOR_BLUE = "blue"
@@ -64,7 +65,12 @@ private const val PREFS_NAME = "token_writer_prefs"
 private const val KEY_IDS_INITIALIZED = "token_ids_initialized"
 private const val KEY_TOKEN_ID_PREFIX = "token_id_"
 
-private val DOMAIN_OPTIONS = listOf(DOMAIN_PHYSICAL_ACTIVITY, DOMAIN_SLEEP, DOMAIN_MOOD)
+private val DOMAIN_OPTIONS = listOf(
+    DOMAIN_PHYSICAL_ACTIVITY,
+    DOMAIN_SLEEP,
+    DOMAIN_MOOD,
+    DOMAIN_SPECIAL
+)
 private val COLOR_OPTIONS = listOf(COLOR_GREEN, COLOR_BLUE, COLOR_YELLOW, COLOR_RED)
 
 class MainActivity : ComponentActivity() {
@@ -132,14 +138,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun initializeAndLoadTokenIds(): Map<String, String> {
+        val editor = prefs.edit()
         if (!prefs.getBoolean(KEY_IDS_INITIALIZED, false)) {
-            val editor = prefs.edit()
             editor.putBoolean(KEY_IDS_INITIALIZED, true)
-            DOMAIN_OPTIONS.forEach { domainType ->
+        }
+        DOMAIN_OPTIONS.forEach { domainType ->
+            if (!prefs.contains(tokenIdKey(domainType))) {
                 editor.putString(tokenIdKey(domainType), "0")
             }
-            editor.apply()
         }
+        editor.apply()
 
         return DOMAIN_OPTIONS.associateWith { domainType ->
             prefs.getString(tokenIdKey(domainType), "0") ?: "0"
@@ -698,7 +706,8 @@ private fun TokenWriterScreenPreview() {
                 tokenIdsByDomain = mapOf(
                     DOMAIN_PHYSICAL_ACTIVITY to "12",
                     DOMAIN_SLEEP to "8",
-                    DOMAIN_MOOD to "3"
+                    DOMAIN_MOOD to "3",
+                    DOMAIN_SPECIAL to "1"
                 ),
                 statusMessage = "Ready. Tap a token to write JSON.",
                 writeCount = 3,
